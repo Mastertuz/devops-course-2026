@@ -1,2 +1,11 @@
-# devops-course-2026
-DevOps-практикум: Git и GitHub
+# DevOps Course 2026
+
+Учебный репозиторий курса "Инструменты DevOps".
+
+## Автор
+Димитров Васил Александров, группа ЭФБО-11-24
+
+## Стек
+- Git / GitHub
+- Python
+- Docker (скоро)
