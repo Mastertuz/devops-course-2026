@@ -20,7 +20,7 @@
 | Адаптер | Тип | Интерфейс | Адрес | Назначение |
 |---|---|---|---|---|
 | 1 | NAT | `enp0s8` | `10.0.2.15/24` (DHCP VirtualBox) | доступ ВМ в Интернет (репозитории пакетов); входящие соединения только через проброс портов |
-| 2 | Host-only (сеть `HostNetwork`, 192.168.56.0/24, DHCP 192.168.56.1–192.168.56.199) | `enp0s9` | `192.168.56.2/24` (DHCP) | доступ с хоста к службам ВМ напрямую, без NAT (браузер, `devops.local`) |
+| 2 | Host-only (сеть `HostNetwork`, 192.168.56.0/24, DHCP 192.168.56.1-192.168.56.199) | `enp0s9` | `192.168.56.2/24` (DHCP) | доступ с хоста к службам ВМ напрямую, без NAT (браузер, `devops.local`) |
 
 - Оба интерфейса получают адреса по DHCP из штатной конфигурации установщика: `/etc/netplan/00-installer-config.yaml` (дополнительных файлов netplan не создавалось).
 - Адрес Host-only выдаётся DHCP-сервером и может измениться; фактический адрес проверяется командой `ip -brief address`.
@@ -55,7 +55,7 @@ VBoxManage controlvm devops-vm natpf1 "ssh,tcp,127.0.0.1,2222,,2222"
 | Имя | UID | Группы | Способ аутентификации | Назначение |
 |---|---|---|---|---|
 | `vasil` | 1000 | `vasil`, `adm`, `cdrom`, `sudo`, `dip`, `plugdev`, `users`, `lxd` | пароль (консоль виртуальной машины); по SSH не допускается (`AllowUsers devops`) | учётная запись установщика, резервный вход через консоль |
-| `devops` | 1001 | `devops`, `sudo`, `users` | по SSH — только ключ ed25519 (`~/.ssh/authorized_keys`, права `700` на `~/.ssh` и `600` на файл); пароль нужен лишь для `sudo` | рабочая учётная запись администратора и владелец публикуемых файлов |
+| `devops` | 1001 | `devops`, `sudo`, `users` | по SSH - только ключ ed25519 (`~/.ssh/authorized_keys`, права `700` на `~/.ssh` и `600` на файл); пароль нужен лишь для `sudo` | рабочая учётная запись администратора и владелец публикуемых файлов |
 
 Создание `devops` (`[VM]`):
 
@@ -92,7 +92,7 @@ Host devops.local
 
 - Пакет: `openssh-server` (устанавливается вручную: `sudo apt install -y openssh-server`).
 - Порт: **2222**.
-- Основной файл конфигурации `/etc/ssh/sshd_config` не изменялся (эталонная копия: `/etc/ssh/sshd_config.backup`); изменения — в дополняющем файле **`/etc/ssh/sshd_config.d/99-hardening.conf`**:
+- Основной файл конфигурации `/etc/ssh/sshd_config` не изменялся (эталонная копия: `/etc/ssh/sshd_config.backup`); изменения - в дополняющем файле **`/etc/ssh/sshd_config.d/99-hardening.conf`**:
 
 | Директива | Значение |
 |---|---|
@@ -162,3 +162,39 @@ sudo ufw status verbose
 | `01-clean-install` | 17:31 | чистая установка Ubuntu Server 26.04.1, установлен `openssh-server`, система обновлена, оба адаптера получили адреса |
 | `02-keys-configured` | 18:24 | создан пользователь `devops`, настроена аутентификация по ключу, добавлен `~/.ssh/config` |
 | `03-ssh-hardened` | 18:35 | применён `99-hardening.conf` (порт 2222, запрет `root` и паролей), правило проброса `2222 → 2222` |
+| `04-nginx-https` | 19:48 | установлен nginx, ресурс `devops.local` обслуживается по HTTPS (самоподписанный сертификат), HTTP перенаправляется на HTTPS |
+
+## 8. Веб-сервер
+
+| Параметр | Значение |
+|---|---|
+| Устанавливаемый пакет | `nginx` 1.28.3 (репозиторий Ubuntu: `sudo apt install -y nginx`) |
+| Конфигурация ресурса | `/etc/nginx/sites-available/devops-site`, активирована ссылкой в `/etc/nginx/sites-enabled/`; стандартный ресурс отключён (ссылка `default` удалена, файл сохранён) |
+| Каталог ресурса | `/var/www/devops-site`; владелец `devops:devops`; права `755` для каталога и `644` для файлов (модель «владелец пишет, веб-сервер читает», права задаёт `rsync --chmod=D755,F644`) |
+| Сертификат | `/etc/ssl/certs/devops.crt`, владелец `root`, права `644`; самоподписанный, CN и SAN `devops.local`, срок действия 365 дней (с 05.10.2026 по 05.10.2027) |
+| Закрытый ключ | `/etc/ssl/private/devops.key`, владелец `root`, права `600` (читается главным процессом nginx до запуска рабочих, рабочие процессы `www-data` доступа не имеют) |
+| Журналы | `/var/log/nginx/devops-site.access.log`, `/var/log/nginx/devops-site.error.log` |
+| Протоколы TLS | `TLSv1.2`, `TLSv1.3`; заголовок HSTS не используется (самоподписанный сертификат) |
+
+Команда формирования сертификата (`[VM]`):
+
+```bash
+sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout /etc/ssl/private/devops.key -out /etc/ssl/certs/devops.crt \
+  -subj "/CN=devops.local" -addext "subjectAltName=DNS:devops.local"
+```
+
+Конфигурация `/etc/nginx/sites-available/devops-site` состоит из двух блоков `server`: первый (`listen 80`, `server_name devops.local`) возвращает `301 https://$host$request_uri`; второй (`listen 443 ssl`, IPv4 и IPv6) задаёт `ssl_certificate`, `ssl_certificate_key`, `ssl_protocols TLSv1.2 TLSv1.3`, `root /var/www/devops-site`, `index index.html`, `try_files $uri $uri/ =404`, `error_page 404 /404.html` и журналы из таблицы выше.
+
+Порядок применения (`[VM]`; каждое изменение конфигурации применяется командой `sudo nginx -t && sudo systemctl reload nginx`, а не `restart`):
+
+```bash
+sudo apt update && sudo apt install -y nginx
+sudo mkdir -p /var/www/devops-site && sudo chown -R devops:devops /var/www/devops-site
+# создать сертификат (команда выше) и файл /etc/nginx/sites-available/devops-site
+sudo ln -s /etc/nginx/sites-available/devops-site /etc/nginx/sites-enabled/
+sudo rm /etc/nginx/sites-enabled/default
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Доставка содержимого (`[Хост]`, нужен `rsync` 3.x; системный `openrsync` в macOS не поддерживает `--chmod`): `scripts/deploy.sh`. Сертификат копируется на хост командой `scp devops:/etc/ssl/certs/devops.crt ~/devops.crt` и указывается клиенту как доверенный (`curl --cacert ~/devops.crt`).
