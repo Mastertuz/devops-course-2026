@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Аудит конфигурации devops-vm. Запускается на виртуальной машине: sudo bash audit.sh
 # Код возврата: 0 - все проверки пройдены, 1 - есть непройденные проверки.
+# Порог срока действия сертификата (дней) можно переопределить: sudo env CERT_MIN_DAYS=400 bash audit.sh
 set -uo pipefail
 
 PASS=0; FAIL=0
+CERT_MIN_DAYS="${CERT_MIN_DAYS:-30}"
 
 check() {
     local desc="$1" expected="$2" actual="$3"
@@ -31,6 +33,14 @@ check "Политика по умолчанию для входящего тра
 
 echo "[3] Учётные записи"
 awk -F: '$3>=1000 && $3<65534 {printf "    %s (uid=%s)\n",$1,$3}' /etc/passwd
+
+echo "[4] Веб-сервер"
+check "Служба nginx активна" "active" "$(systemctl is-active nginx)"
+check "Конфигурация nginx синтаксически корректна (nginx -t)" "0" "$(sudo nginx -t >/dev/null 2>&1; echo $?)"
+check "Сертификат истекает не ранее чем через ${CERT_MIN_DAYS} дн." "0" \
+    "$(openssl x509 -in /etc/ssl/certs/devops.crt -noout -checkend $((CERT_MIN_DAYS * 86400)) >/dev/null 2>&1; echo $?)"
+check "В каталоге ресурса нет файлов, доступных для записи всем; права ключа равны 600" "0 600" \
+    "$(find /var/www/devops-site -perm -o+w | wc -l | tr -d ' ') $(sudo stat -c '%a' /etc/ssl/private/devops.key)"
 
 echo "Пройдено: $PASS, не пройдено: $FAIL"
 [[ $FAIL -eq 0 ]] && exit 0 || exit 1
