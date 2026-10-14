@@ -163,6 +163,7 @@ sudo ufw status verbose
 | `02-keys-configured` | 18:24 | создан пользователь `devops`, настроена аутентификация по ключу, добавлен `~/.ssh/config` |
 | `03-ssh-hardened` | 18:35 | применён `99-hardening.conf` (порт 2222, запрет `root` и паролей), правило проброса `2222 → 2222` |
 | `04-nginx-https` | 19:48 | установлен nginx, ресурс `devops.local` обслуживается по HTTPS (самоподписанный сертификат), HTTP перенаправляется на HTTPS |
+| `05-docker-compose` | 14.10.2026 21:41 | установлен Docker Engine, проект `~/app` (приложение + PostgreSQL) запущен через Compose, порт приложения только на `127.0.0.1`, счётчик посещений хранится в именованном томе |
 
 ## 8. Веб-сервер
 
@@ -198,3 +199,65 @@ sudo nginx -t && sudo systemctl reload nginx
 ```
 
 Доставка содержимого (`[Хост]`, нужен `rsync` 3.x; системный `openrsync` в macOS не поддерживает `--chmod`): `scripts/deploy.sh`. Сертификат копируется на хост командой `scp devops:/etc/ssl/certs/devops.crt ~/devops.crt` и указывается клиенту как доверенный (`curl --cacert ~/devops.crt`).
+
+## 9. Контейнеризация
+
+| Параметр | Значение |
+|---|---|
+| Способ установки | Docker Engine из официального репозитория `download.docker.com` (файл `/etc/apt/sources.list.d/docker.sources`, `Suites: resolute`, `Architectures: arm64`, ключ `/etc/apt/keyrings/docker.asc`, отпечаток `9DC8 5822 9FC7 DD38 854A E2D8 8D81 803C 0EBF CD88`); пакет `docker.io` из репозитория дистрибутива не используется |
+| Версии | `docker-ce` 29.9.0, `containerd.io` 2.4.2, `docker-buildx-plugin` 0.38.0, `docker-compose-plugin` 5.6.0 |
+| Участники группы `docker` | только `devops` (группа даёт фактически права `root`: контейнер с каталогом `/` хоста, смонтированным на запись; поэтому включаются только учётные записи с правом `sudo`) |
+| Проект на сервере | `/home/devops/app` (владелец `devops:devops`, права 755); исходный код доставляется с хоста командой `rsync -avz --delete --exclude=.env app/ devops:app/`; имя проекта Compose `app` |
+| Файл с секретами | `/home/devops/app/.env`, владелец `devops:devops`, права 600; создаётся только на сервере из шаблона `.env.example`, пароль СУБД формируется командой `openssl rand -hex 16`; в репозиторий не добавляется (`.gitignore`), в образ не попадает (`.dockerignore`) |
+| Образы | `devops-app:1.0` (на базе `python:3.12-slim`, процесс от пользователя `app`), `postgres:16-alpine` (тег фиксирует основную версию: формат данных несовместим между основными версиями) |
+| Контейнеры | `app-app-1` (приложение), `app-db-1` (СУБД, проверка `pg_isready`, состояние `healthy`), политика перезапуска `unless-stopped`; приложение стартует после успешной проверки СУБД (`condition: service_healthy`) |
+| Публикуемые порты | приложение: `127.0.0.1:5000 -> 5000/tcp` (только локальный адрес, доступ извне через Nginx); СУБД: порт не публикуется, доступна приложению по имени `db` в сети проекта |
+| Сеть | пользовательская сеть `app_backend` (драйвер `bridge`), встроенный DNS разрешает имена сервисов |
+| Именованные тома | `app_db_data` (драйвер `local`, `/var/lib/docker/volumes/app_db_data/_data`) - данные PostgreSQL; сохраняется командой `docker compose down`, удаляется командой `docker compose down -v` |
+| Обратный прокси-сервер | в блок `server` с `listen 443 ssl` файла `/etc/nginx/sites-available/devops-site` добавлено `location /app/` с `proxy_pass http://127.0.0.1:5000/;` и заголовками `Host`, `X-Real-IP`, `X-Forwarded-For`, `X-Forwarded-Proto`; статический ресурс (`location /`) сохранён |
+
+Установка Docker Engine (`[VM]`):
+
+```bash
+sudo apt update && sudo apt install -y ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+# сверить отпечаток: gpg --show-keys --with-fingerprint /etc/apt/keyrings/docker.asc
+sudo tee /etc/apt/sources.list.d/docker.sources <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo usermod -aG docker devops        # затем новая SSH-сессия
+docker run --rm hello-world
+```
+
+Запуск проекта (`[VM]`):
+
+```bash
+cd ~/app
+cp .env.example .env && chmod 600 .env
+sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$(openssl rand -hex 16)/" .env
+docker compose up -d --build
+docker compose ps                      # app-db-1 (healthy)
+```
+
+Подключение приложения к Nginx (`[VM]`; фрагмент добавляется в блок HTTPS, затем `sudo nginx -t && sudo systemctl reload nginx`):
+
+```nginx
+location /app/ {
+    proxy_pass http://127.0.0.1:5000/;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+Особенность публикации портов: Docker перенаправляет пакеты к опубликованному порту правилами `iptables` до обработки правилами UFW, поэтому порт, опубликованный на `0.0.0.0` (например, `-p 5001:5000`), доступен из сети независимо от политики `deny incoming`. Порт приложения публикуется только на `127.0.0.1`, порт СУБД не публикуется.
