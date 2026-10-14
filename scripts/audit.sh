@@ -2,10 +2,13 @@
 # Аудит конфигурации devops-vm. Запускается на виртуальной машине: sudo bash audit.sh
 # Код возврата: 0 - все проверки пройдены, 1 - есть непройденные проверки.
 # Порог срока действия сертификата (дней) можно переопределить: sudo env CERT_MIN_DAYS=400 bash audit.sh
+# Каталог проекта контейнеров по умолчанию - ~/app пользователя, запустившего sudo; переопределение: APP_DIR=/путь
 set -uo pipefail
 
 PASS=0; FAIL=0
 CERT_MIN_DAYS="${CERT_MIN_DAYS:-30}"
+# при запуске через sudo переменная HOME указывает на каталог root, поэтому домашний каталог берётся по имени пользователя
+APP_DIR="${APP_DIR:-$(getent passwd "${SUDO_USER:-$USER}" | cut -d: -f6)/app}"
 
 check() {
     local desc="$1" expected="$2" actual="$3"
@@ -41,6 +44,13 @@ check "Сертификат истекает не ранее чем через $
     "$(openssl x509 -in /etc/ssl/certs/devops.crt -noout -checkend $((CERT_MIN_DAYS * 86400)) >/dev/null 2>&1; echo $?)"
 check "В каталоге ресурса нет файлов, доступных для записи всем; права ключа равны 600" "0 600" \
     "$(find /var/www/devops-site -perm -o+w | wc -l | tr -d ' ') $(sudo stat -c '%a' /etc/ssl/private/devops.key)"
+
+echo "[5] Контейнеризация"
+check "Служба docker активна" "active" "$(systemctl is-active docker)"
+check "Контейнер СУБД в состоянии healthy" "healthy" "$(docker inspect -f '{{.State.Health.Status}}' app-db-1 2>/dev/null)"
+check "Порты 5000 и 5432 не прослушиваются на адресах, кроме 127.0.0.1" "0" \
+    "$(ss -tln | awk '$4 ~ /:(5000|5432)$/ && $4 !~ /^127\.0\.0\.1:/ {n++} END {print n+0}')"
+check "Права файла .env равны 600" "600" "$(stat -c '%a' "${APP_DIR}/.env" 2>/dev/null)"
 
 echo "Пройдено: $PASS, не пройдено: $FAIL"
 [[ $FAIL -eq 0 ]] && exit 0 || exit 1
