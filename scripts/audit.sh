@@ -3,12 +3,18 @@
 # Код возврата: 0 - все проверки пройдены, 1 - есть непройденные проверки.
 # Порог срока действия сертификата (дней) можно переопределить: sudo env CERT_MIN_DAYS=400 bash audit.sh
 # Каталог проекта контейнеров по умолчанию - ~/app пользователя, запустившего sudo; переопределение: APP_DIR=/путь
+# Раздел [6] (контрольная работа № 2): проект ~/kr2, порт варианта 8002, ресурс kr2; переопределение: KR2_DIR, KR2_PORT, KR2_SITE
 set -uo pipefail
 
 PASS=0; FAIL=0
 CERT_MIN_DAYS="${CERT_MIN_DAYS:-30}"
 # при запуске через sudo переменная HOME указывает на каталог root, поэтому домашний каталог берётся по имени пользователя
 APP_DIR="${APP_DIR:-$(getent passwd "${SUDO_USER:-$USER}" | cut -d: -f6)/app}"
+# параметры контрольной работы № 2 (вариант 2: порт 8002)
+KR2_DIR="${KR2_DIR:-$(getent passwd "${SUDO_USER:-$USER}" | cut -d: -f6)/kr2}"
+KR2_PORT="${KR2_PORT:-8002}"
+KR2_SITE="${KR2_SITE:-kr2}"
+NGINX_ENABLED_DIR="${NGINX_ENABLED_DIR:-/etc/nginx/sites-enabled}"
 
 check() {
     local desc="$1" expected="$2" actual="$3"
@@ -51,6 +57,20 @@ check "Контейнер СУБД в состоянии healthy" "healthy" "$(d
 check "Порты 5000 и 5432 не прослушиваются на адресах, кроме 127.0.0.1" "0" \
     "$(ss -tln | awk '$4 ~ /:(5000|5432)$/ && $4 !~ /^127\.0\.0\.1:/ {n++} END {print n+0}')"
 check "Права файла .env равны 600" "600" "$(stat -c '%a' "${APP_DIR}/.env" 2>/dev/null)"
+
+echo "[6] Контрольная работа № 2"
+# контейнер определяется по имени сервиса, а не по имени, сформированному Compose
+KR2_REDIS_ID="$(docker compose --project-directory "${KR2_DIR}" ps -q redis 2>/dev/null)"
+check "Контейнер сервиса redis в состоянии healthy" "healthy" \
+    "$(docker inspect -f '{{.State.Health.Status}}' "${KR2_REDIS_ID}" 2>/dev/null)"
+# адреса публикации порта (IPv4 и IPv6), без номера порта; ожидается единственный адрес 127.0.0.1
+check "Порт ${KR2_PORT} опубликован только на адресе 127.0.0.1" "127.0.0.1" \
+    "$(docker compose --project-directory "${KR2_DIR}" port app "${KR2_PORT}" 2>/dev/null | sed 's/:[0-9]*$//' | sort -u | paste -sd, -)"
+check "Права файла ${KR2_DIR}/.env равны 600" "600" "$(stat -c '%a' "${KR2_DIR}/.env" 2>/dev/null)"
+check "Сертификат kr2.crt истекает не ранее чем через ${CERT_MIN_DAYS} дн." "0" \
+    "$(openssl x509 -in /etc/ssl/certs/kr2.crt -noout -checkend $((CERT_MIN_DAYS * 86400)) >/dev/null 2>&1; echo $?)"
+check "Ресурс ${KR2_SITE} активирован (ссылка в ${NGINX_ENABLED_DIR})" "yes" \
+    "$([[ -L "${NGINX_ENABLED_DIR}/${KR2_SITE}" ]] && echo yes || echo no)"
 
 echo "Пройдено: $PASS, не пройдено: $FAIL"
 [[ $FAIL -eq 0 ]] && exit 0 || exit 1
