@@ -1,0 +1,8 @@
+---
+app_image: "ghcr.io/mastertuz/devops-ci-app"
+app_tag: "641b865ca07bd8b46580675ffd62b62120f03616"
+app_container_name: "devops-ci-app"
+app_host_port: 5000
+app_internal_port: 5000
+# Учётная запись первичного доступа (создана при установке ОС)
+bootstrap_user: "vasil"
