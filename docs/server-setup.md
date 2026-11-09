@@ -261,3 +261,49 @@ location /app/ {
 ```
 
 Особенность публикации портов: Docker перенаправляет пакеты к опубликованному порту правилами `iptables` до обработки правилами UFW, поэтому порт, опубликованный на `0.0.0.0` (например, `-p 5001:5000`), доступен из сети независимо от политики `deny incoming`. Порт приложения публикуется только на `127.0.0.1`, порт СУБД не публикуется.
+
+## 10. Ansible
+
+| Параметр | Значение |
+|---|---|
+| Расположение проекта | каталог `ansible/` репозитория; все команды выполняются из него (`ansible.cfg` читается только из текущего каталога) |
+| Управляющий узел | macOS, `ansible-core` 2.21.6; установка: `brew install ansible` и `brew install hudochenkov/sshpass/sshpass` (нужен только для первичного запуска по паролю); коллекции из `requirements.yml` (`ansible.posix` 1.6.2, `community.docker` 4.5.0, `community.general` 9.5.0): `ansible-galaxy collection install -r ansible/requirements.yml` |
+| Управляемый узел | ВМ `devops-vm`, Ubuntu Server 26.04.1 LTS (`resolute`), архитектура `aarch64`; Host-only адрес `192.168.56.2`, SSH на порту 22; агент на ВМ не нужен (модули доставляются по SSH, на ВМ нужны `python3` и `python3-requests`) |
+| Inventory | `inventory/bootstrap.ini` - первичный запуск: пользователь `vasil`, пароль запрашивается интерактивно; `inventory/prod.ini` - рабочий: пользователь `devops`, ключ `~/.ssh/devops_vm` (без парольной фразы); `ansible.cfg` по умолчанию выбирает `prod.ini` |
+| Учётные записи | `vasil` - учётная запись, созданная при установке ОС (только для bootstrap, после него вход по паролю отключён); `devops` - автоматизация: ключ `devops_vm.pub`, `sudo` без пароля (`/etc/sudoers.d/devops`, проверяется `visudo -cf`) |
+| Роли | `base` - платформа (проверка Ubuntu/архитектуры), пакеты `ca-certificates curl gnupg openssh-server ufw python3-debian python3-requests`, официальный репозиторий Docker (`deb822_repository`, `Suites` = кодовое имя релиза, архитектура определяется автоматически), Docker Engine; `ssh` - пользователь `devops`, ключ, sudo, `/etc/ssh/sshd_config.d/00-ansible-hardening.conf` (отключены пароли и вход `root`, `AllowUsers vasil devops`, проверка `sshd -t`), UFW (разрешены 22 и 80, входящие по умолчанию запрещены); `nginx` - установка, обратный прокси `/etc/nginx/sites-available/devops-ci-app` (шаблон `devops-ci-app.conf.j2`), отключён сайт по умолчанию, handler проверяет `nginx -t` перед reload; `app` - загрузка образа, контейнер, проверка `/health` |
+| Образ GHCR | `ghcr.io/mastertuz/devops-ci-app` (пакет публичный, владелец строчными буквами) |
+| Версия образа | `app_tag` в `group_vars/all.yml` - полный SHA коммита `641b865ca07bd8b46580675ffd62b62120f03616` (merge PR из ПР № 10); тег `latest` не используется |
+| Контейнер | имя `devops-ci-app`, порт приложения 5000, публикация `127.0.0.1:5000:5000` (только loopback: порты Docker обходят правила UFW, поэтому ограничение задаётся адресом привязки), политика `unless-stopped` |
+| Health endpoint | `GET /health` возвращает `{"status":"ok"}`; Ansible проверяет напрямую `http://127.0.0.1:5000/health` (до 15 попыток с интервалом 2 с), снаружи доступен через Nginx `http://192.168.56.2/health` |
+| Настройки `ansible.cfg` | `force_handlers = True` (уведомлённые handlers SSH и Nginx выполняются, даже если более поздняя задача завершилась ошибкой), `host_key_checking = True`, `pipelining = True`, `retry_files_enabled = False` |
+
+Первичный запуск (`[Control]`, из каталога `ansible/`; пароль `vasil` вводится на оба запроса, в репозиторий не записывается):
+
+```bash
+ssh vasil@192.168.56.2            # однократно: проверить и принять ключ хоста
+ansible-playbook -i inventory/bootstrap.ini site.yml --ask-pass --ask-become-pass
+```
+
+Повторный запуск (по ключу, без паролей; на хосте без отклонений итог `changed=0 failed=0`):
+
+```bash
+ansible-playbook site.yml
+```
+
+Проверка доступа и внешней цепочки (`[Control]`):
+
+```bash
+ansible all -m ping
+curl --fail http://192.168.56.2/health
+```
+
+Read-only аудит (не меняет состояние, итог `changed=0`; падает, если контейнер остановлен или вход по паролю включён):
+
+```bash
+ansible-playbook verify.yml
+```
+
+Смена версии: заменить `app_tag` на полный SHA нужного опубликованного образа, закоммитить и выполнить `ansible-playbook site.yml`; при отсутствии тега задача загрузки завершается ошибкой до изменения контейнера, прежняя версия продолжает работать.
+
+Пароли и закрытый ключ в репозиторий не входят: пароль `vasil` запрашивается при запуске, закрытый ключ `~/.ssh/devops_vm` хранится только на управляющем узле, из проекта читается только открытый ключ.
