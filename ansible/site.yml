@@ -8,3 +8,20 @@
     - ssh
     - nginx
     - app
+
+  post_tasks:
+    # reload Nginx лишь посылает сигнал и возвращается сразу: без повторов
+    # проверка через прокси может попасть на старый рабочий процесс
+    - name: Apply pending handlers before external check
+      ansible.builtin.meta: flush_handlers
+
+    - name: Check application through Nginx
+      ansible.builtin.uri:
+        url: "http://127.0.0.1/health"
+        return_content: true
+      register: proxy_health
+      retries: 15
+      delay: 2
+      until: >
+        (proxy_health.status | default(-1)) == 200 and
+        (proxy_health.json | default({})).get("status") == "ok"

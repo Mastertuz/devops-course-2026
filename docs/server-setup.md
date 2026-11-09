@@ -278,6 +278,8 @@ location /app/ {
 | Health endpoint | `GET /health` возвращает `{"status":"ok"}`; Ansible проверяет напрямую `http://127.0.0.1:5000/health` (до 15 попыток с интервалом 2 с), снаружи доступен через Nginx `http://192.168.56.2/health` |
 | Настройки `ansible.cfg` | `force_handlers = True` (уведомлённые handlers SSH и Nginx выполняются, даже если более поздняя задача завершилась ошибкой), `host_key_checking = True`, `pipelining = True`, `retry_files_enabled = False` |
 
+Завершающая проверка плейбука: в `post_tasks` файла `site.yml` handlers выполняются принудительно (`meta: flush_handlers`), затем `uri` с повторами проверяет `http://127.0.0.1/health` уже через Nginx. Это нужно потому, что `systemctl reload nginx` только посылает сигнал и возвращается сразу: без повторов запрос сразу после reload мог попасть на старый рабочий процесс (в инциденте с drift это давало 502 на порт 5001 после зелёного запуска).
+
 Первичный запуск (`[Control]`, из каталога `ansible/`; пароль `vasil` вводится на оба запроса, в репозиторий не записывается):
 
 ```bash
